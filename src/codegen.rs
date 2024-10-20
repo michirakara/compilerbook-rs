@@ -30,7 +30,7 @@ pub fn codegen(program: Vec<Function>) {
         }
 
         for i in f.nodes {
-            gen(i, &mut data);
+            gen(&i, &mut data);
         }
         println!(".Lreturn.{}:", f.name);
         println!("    mov rsp, rbp");
@@ -40,12 +40,15 @@ pub fn codegen(program: Vec<Function>) {
     }
 }
 
-fn gen_addr(node: Node, data: &mut Data) {
-    if let NodeType::LVar { val } = node.node {
-        println!("    lea rax, [rbp-{}]", data.stack_size + 8 - val.offset);
+fn gen_addr(node: &Node, data: &mut Data) {
+    if let NodeType::LVar { val } = &node.node {
+        println!(
+            "    lea rax, [rbp-{}]",
+            data.stack_size + node.ty.as_ref().unwrap().sizeof() - val.offset
+        );
         println!("    push rax");
-    } else if let NodeType::Deref { val } = node.node {
-        gen(*val, data);
+    } else if let NodeType::Deref { val } = &node.node {
+        gen(&val, data);
     } else {
         dbg!(node);
         panic!();
@@ -65,11 +68,11 @@ fn load() {
     println!("    push rax");
 }
 
-pub fn gen(node: Node, data: &mut Data) {
-    match node.node {
+pub fn gen(node: &Node, data: &mut Data) {
+    match &node.node {
         NodeType::Block { stmts } => {
             for i in stmts {
-                gen(i, data);
+                gen(&i, data);
             }
         }
         NodeType::If {
@@ -79,15 +82,15 @@ pub fn gen(node: Node, data: &mut Data) {
         } => {
             let idx = data.label_idx;
             data.label_idx += 1;
-            gen(*cond, data);
+            gen(&cond, data);
             println!("    pop rax");
             println!("    cmp rax, 0");
             println!("    je .Lelse{}", idx);
-            gen(*if_do, data);
+            gen(&if_do, data);
             println!("    jmp .Lend{}", idx);
             println!(".Lelse{}:", idx);
             if let Some(else_do) = else_do {
-                gen(*else_do, data);
+                gen(&else_do, data);
             }
             println!(".Lend{}:", idx);
         }
@@ -100,18 +103,18 @@ pub fn gen(node: Node, data: &mut Data) {
             let idx = data.label_idx;
             data.label_idx += 1;
             if let Some(init) = init {
-                gen(*init, data);
+                gen(&init, data);
             }
             println!(".Lbegin{}:", idx);
             if let Some(cond) = cond {
-                gen(*cond, data);
+                gen(&cond, data);
             }
             println!("    pop rax");
             println!("    cmp rax, 0");
             println!("    je .Lend{}", idx);
-            gen(*stmt, data);
+            gen(&stmt, data);
             if let Some(expr) = expr {
-                gen(*expr, data);
+                gen(&expr, data);
             }
             println!("    jmp .Lbegin{}", idx);
             println!(".Lend{}:", idx);
@@ -120,30 +123,33 @@ pub fn gen(node: Node, data: &mut Data) {
             let idx = data.label_idx;
             data.label_idx += 1;
             println!(".Lbegin{}:", idx);
-            gen(*cond, data);
+            gen(&cond, data);
             println!("    pop rax");
             println!("    cmp rax, 0");
             println!("    je .Lend{}", idx);
-            gen(*while_do, data);
+            gen(&while_do, data);
             println!("    jmp .Lbegin{}", idx);
             println!(".Lend{}:", idx);
         }
         NodeType::Return { stmt } => {
-            gen(*stmt, data);
+            gen(&stmt, data);
             println!("    pop rax");
             println!("    jmp .Lreturn.{}", data.funcname);
         }
         NodeType::Assign { lhs, rhs } => {
-            gen_addr(*lhs, data);
-            gen(*rhs, data);
+            gen_addr(&lhs, data);
+            gen(&rhs, data);
             store();
         }
         NodeType::Addr { val } => {
-            gen_addr(*val, data);
+            gen_addr(&val, data);
         }
         NodeType::Deref { val } => {
-            gen(*val, data);
-            load();
+            gen(&val, data);
+            if let Some(Type::Array { of, size }) = &node.ty {
+            } else {
+                load();
+            }
         }
         NodeType::Num { val } => {
             println!("    push {}", val);
@@ -151,7 +157,7 @@ pub fn gen(node: Node, data: &mut Data) {
         NodeType::FunCall { name, args } => {
             let tmp = args.len();
             for i in args {
-                gen(i, data);
+                gen(&i, data);
             }
             for (_, reg) in zip(0..tmp, ARGREG).rev() {
                 println!("    pop {}", reg);
@@ -173,24 +179,33 @@ pub fn gen(node: Node, data: &mut Data) {
             println!("    push rax");
         }
         NodeType::LVar { val: _ } => {
-            gen_addr(node, data);
-            load();
+            gen_addr(&node, data);
+            if let Some(Type::Array { of, size }) = &node.ty {
+            } else {
+                load();
+            }
         }
         NodeType::Op { kind, lhs, rhs } => {
-            gen(*lhs, data);
-            gen(*rhs, data);
+            gen(&lhs, data);
+            gen(&rhs, data);
             println!("    pop rdi");
             println!("    pop rax");
             match kind {
                 NodeKind::Add => {
-                    if let Some(Type::Ptr { to: _ }) = node.ty {
-                        println!("    imul rdi, 8");
+                    match &node.ty {
+                        Some(Type::Ptr { to }) | Some(Type::Array { of: to, size: _ }) => {
+                            println!("    imul rdi, {}", to.sizeof());
+                        }
+                        _ => {}
                     }
                     println!("    add rax, rdi");
                 }
                 NodeKind::Sub => {
-                    if let Some(Type::Ptr { to: _ }) = node.ty {
-                        println!("    imul rdi, 8");
+                    match &node.ty {
+                        Some(Type::Ptr { to }) | Some(Type::Array { of: to, size: _ }) => {
+                            println!("    imul rdi, {}", to.sizeof());
+                        }
+                        _ => {}
                     }
                     println!("    sub rax, rdi");
                 }

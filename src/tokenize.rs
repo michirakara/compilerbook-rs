@@ -84,8 +84,9 @@ pub enum Token {
     Num(u64),
 }
 
-const RESERVED: [&str; 18] = [
+const RESERVED: [&str; 20] = [
     "<=", ">=", "==", "!=", "<", ">", "+", "-", "*", "/", "(", ")", "=", ";", "{", "}", ",", "&",
+    "[", "]",
 ];
 
 type Tokens = Vec<(Token, (usize, usize))>;
@@ -99,6 +100,7 @@ pub fn tokenize(s: &[char]) -> Tokens {
         if iter.next_if(|&c| c == '\n').is_some() {
             x = 0;
             y += 1;
+            continue;
         }
         if iter.next_if(|&c| c.is_whitespace()).is_some() {
             x += 1;
@@ -144,6 +146,10 @@ pub fn tokenize(s: &[char]) -> Tokens {
                     "int" => {
                         x += 3;
                         Token::BaseType(BaseType::Int)
+                    }
+                    "sizeof" => {
+                        x += 6;
+                        Token::Reserved("sizeof")
                     }
                     _ => {
                         x += s.len();

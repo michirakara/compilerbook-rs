@@ -1,4 +1,4 @@
-use crate::tokenize::Token;
+use crate::tokenize::{BaseType, Token};
 use std::iter::Peekable;
 
 #[derive(Debug, Clone)]
@@ -16,7 +16,18 @@ pub enum NodeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Ptr { to: Box<Type> },
+    Array { of: Box<Type>, size: usize },
     Int,
+}
+
+impl Type {
+    pub fn sizeof(&self) -> usize {
+        match self {
+            Self::Int => 8,
+            Self::Ptr { to: _ } => 8,
+            Self::Array { of, size } => of.sizeof() * size,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -166,7 +177,7 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
             name: s.to_string(),
             ty: ty.clone(),
             offset: {
-                self.locals.stack_size += 8;
+                self.locals.stack_size += ty.sizeof();
                 self.locals.locals.push(LVar {
                     name: s.to_string(),
                     ty: ty.clone(),
@@ -219,166 +230,140 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
             false
         }
     }
+    fn expect_ident(&mut self) -> Result<String, Error> {
+        if let Some((Token::Ident(s), _)) = self.next() {
+            Ok(s)
+        } else {
+            Err(Error {
+                ty: ErrorType::Parse,
+                pos: self.pos,
+                msg: "expected an identifier".to_string(),
+            })
+        }
+    }
+    fn expect_number(&mut self) -> Result<u64, Error> {
+        if let Some((Token::Num(n), _)) = self.next() {
+            Ok(n)
+        } else {
+            Err(Error {
+                ty: ErrorType::Parse,
+                pos: self.pos,
+                msg: "expected a number".to_string(),
+            })
+        }
+    }
+    fn basetype(&mut self) -> Result<Type, Error> {
+        if self
+            .next_if(|i| i.0 == Token::BaseType(BaseType::Int))
+            .is_some()
+        {
+            let mut ty = Type::Int;
+            while self.is_expected_then_next("*") {
+                ty = Type::Ptr { to: Box::new(ty) };
+            }
+            Ok(ty)
+        } else {
+            Err(Error {
+                ty: ErrorType::Parse,
+                pos: self.pos,
+                msg: "expected int".to_string(),
+            })
+        }
+    }
+    fn type_suffix(&mut self, ty: Type) -> Result<Type, Error> {
+        if self.is_expected_then_next("[") {
+            let size = self.expect_number()? as usize;
+            self.expect("]")?;
+            let ty = self.type_suffix(ty)?;
+            Ok(Type::Array {
+                of: Box::new(ty),
+                size,
+            })
+        } else {
+            Ok(ty)
+        }
+    }
     pub fn program(&mut self) -> Result<Vec<Function>, Error> {
         let tmp = self.iter.clone();
         while self.iter.peek().is_some() {
-            if let Some((Token::BaseType(_), _)) = self.next() {
-                let mut ty = Type::Int;
-                while self.is_expected_then_next("*") {
-                    ty = Type::Ptr { to: Box::new(ty) };
+            let ty = self.basetype()?;
+            let s = self.expect_ident()?;
+            let ty = self.type_suffix(ty)?;
+            let mut func = Function {
+                name: s.to_string(),
+                args: Vec::new(),
+                ret: ty,
+                nodes: Vec::new(),
+                stack_size: 0,
+            };
+            self.expect("(")?;
+            if !self.is_expected_then_next(")") {
+                let ty = self.basetype()?;
+                let s = self.expect_ident()?;
+                let ty = self.type_suffix(ty)?;
+                func.args.push(self.new_lvar(&s, &ty)?);
+                while !self.is_expected_then_next(")") {
+                    self.expect(",")?;
+                    let ty = self.basetype()?;
+                    let s = self.expect_ident()?;
+                    let ty = self.type_suffix(ty)?;
+                    func.args.push(self.new_lvar(&s, &ty)?);
                 }
-                if let Some((Token::Ident(s), _)) = self.next() {
-                    let mut func = Function {
-                        name: s.to_string(),
-                        args: Vec::new(),
-                        ret: ty,
-                        nodes: Vec::new(),
-                        stack_size: 0,
-                    };
-                    self.expect("(")?;
-                    if !self.is_expected_then_next(")") {
-                        if let Some((Token::BaseType(_), _)) = self.next() {
-                            let mut ty = Type::Int;
-                            while self.is_expected_then_next("*") {
-                                ty = Type::Ptr { to: Box::new(ty) };
-                            }
-                            if let Some((Token::Ident(s), _)) = self.next() {
-                                func.args.push(self.new_lvar(&s, &ty)?);
-                            } else {
-                                return Err(Error {
-                                    ty: ErrorType::Parse,
-                                    pos: self.pos,
-                                    msg: "expected an identifier".to_string(),
-                                });
-                            }
-                        } else {
-                            return Err(Error {
-                                ty: ErrorType::Parse,
-                                pos: self.pos,
-                                msg: "expected a type".to_string(),
-                            });
-                        }
-                        while !self.is_expected_then_next(")") {
-                            self.expect(",")?;
-                            if let Some((Token::BaseType(_), _)) = self.next() {
-                                let mut ty = Type::Int;
-                                while self.is_expected_then_next("*") {
-                                    ty = Type::Ptr { to: Box::new(ty) };
-                                }
-                                if let Some((Token::Ident(s), _)) = self.next() {
-                                    func.args.push(self.new_lvar(&s, &ty)?);
-                                } else {
-                                    return Err(Error {
-                                        ty: ErrorType::Parse,
-                                        pos: self.pos,
-                                        msg: "expected an identifier".to_string(),
-                                    });
-                                }
-                            } else {
-                                return Err(Error {
-                                    ty: ErrorType::Parse,
-                                    pos: self.pos,
-                                    msg: "expected a type".to_string(),
-                                });
-                            }
-                        }
-                    }
-                    self.expect("{")?;
-                    let mut cnt = 1;
-                    for s in self.iter.by_ref() {
-                        if s.0 == Token::Reserved("{") {
-                            cnt += 1;
-                        }
-                        if s.0 == Token::Reserved("}") {
-                            cnt -= 1;
-                        }
-                        if cnt == 0 {
-                            break;
-                        }
-                    }
-                    self.funcs.push(func);
-                } else {
-                    return Err(Error {
-                        ty: ErrorType::Parse,
-                        pos: self.pos,
-                        msg: "expected an identifier".to_string(),
-                    });
-                }
-                self.locals.locals = Vec::new();
-                self.locals.stack_size = 0;
-            } else {
-                return Err(Error {
-                    ty: ErrorType::Parse,
-                    pos: self.pos,
-                    msg: "expected a type".to_string(),
-                });
             }
+            self.expect("{")?;
+            let mut cnt = 1;
+            while let Some(s) = self.next() {
+                if s.0 == Token::Reserved("{") {
+                    cnt += 1;
+                }
+                if s.0 == Token::Reserved("}") {
+                    cnt -= 1;
+                }
+                if cnt == 0 {
+                    break;
+                }
+            }
+            self.funcs.push(func);
+            self.locals.locals = Vec::new();
+            self.locals.stack_size = 0;
         }
-
         let mut idx = 0;
         self.iter = tmp;
         self.pos = (0, 1);
         while self.iter.peek().is_some() {
-            if let Some((Token::BaseType(_), _)) = self.next() {
-                let mut ty = Type::Int;
-                while self.is_expected_then_next("*") {
-                    ty = Type::Ptr { to: Box::new(ty) };
+            let ty = self.basetype()?;
+            let s = self.expect_ident()?;
+            let ty = self.type_suffix(ty)?;
+            let mut func = Function {
+                name: s.to_string(),
+                args: Vec::new(),
+                ret: ty,
+                nodes: Vec::new(),
+                stack_size: 0,
+            };
+            self.expect("(")?;
+            if !self.is_expected_then_next(")") {
+                let ty = self.basetype()?;
+                let s = self.expect_ident()?;
+                let ty = self.type_suffix(ty)?;
+                func.args.push(self.new_lvar(&s, &ty)?);
+                while !self.is_expected_then_next(")") {
+                    self.expect(",")?;
+                    let ty = self.basetype()?;
+                    let s = self.expect_ident()?;
+                    let ty = self.type_suffix(ty)?;
+                    func.args.push(self.new_lvar(&s, &ty)?);
                 }
-                if let Some((Token::Ident(s), _)) = self.next() {
-                    let mut func = Function {
-                        name: s.to_string(),
-                        args: Vec::new(),
-                        ret: ty,
-                        nodes: Vec::new(),
-                        stack_size: 0,
-                    };
-                    self.expect("(")?;
-                    if !self.is_expected_then_next(")") {
-                        if let Some((Token::BaseType(_), _)) = self.next() {
-                            let mut ty = Type::Int;
-                            while self.is_expected_then_next("*") {
-                                ty = Type::Ptr { to: Box::new(ty) };
-                            }
-                            if let Some((Token::Ident(s), _)) = self.next() {
-                                func.args.push(self.new_lvar(&s, &ty)?);
-                            }
-                        }
-                        while !self.is_expected_then_next(")") {
-                            self.expect(",")?;
-                            if let Some((Token::BaseType(_), _)) = self.next() {
-                                let mut ty = Type::Int;
-                                while self.is_expected_then_next("*") {
-                                    ty = Type::Ptr { to: Box::new(ty) };
-                                }
-                                if let Some((Token::Ident(s), _)) = self.next() {
-                                    func.args.push(self.new_lvar(&s, &ty)?);
-                                }
-                            }
-                        }
-                    }
-                    self.expect("{")?;
-                    while !self.is_expected_then_next("}") {
-                        func.nodes.push(self.stmt()?);
-                    }
-                    func.stack_size = self.locals.stack_size;
-                    self.funcs[idx] = func;
-                    idx += 1;
-                } else {
-                    return Err(Error {
-                        ty: ErrorType::Parse,
-                        pos: self.pos,
-                        msg: "expected an identifier".to_string(),
-                    });
-                }
-                self.locals.locals = Vec::new();
-                self.locals.stack_size = 0;
-            } else {
-                return Err(Error {
-                    ty: ErrorType::Parse,
-                    pos: self.pos,
-                    msg: "expected a type".to_string(),
-                });
             }
+            self.expect("{")?;
+            while !self.is_expected_then_next("}") {
+                func.nodes.push(self.stmt()?);
+            }
+            func.stack_size = self.locals.stack_size;
+            self.funcs[idx] = func;
+            idx += 1;
+            self.locals.locals = Vec::new();
+            self.locals.stack_size = 0;
         }
         Ok(self.funcs.clone())
     }
@@ -458,64 +443,40 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
                 },
             })
         } else if let Some((Token::BaseType(_), (_, _))) = self.iter.peek() {
-            self.next();
-            let mut ty = Type::Int;
-            while self.is_expected_then_next("*") {
-                ty = Type::Ptr { to: Box::new(ty) };
-            }
-            if let Some((Token::Ident(s), (_, _))) = self.next() {
-                let lvar = self.new_lvar(&s, &ty)?;
-                if self.is_expected_then_next("=") {
-                    let rhs = self.expr()?;
-                    if rhs.ty.is_some() && rhs.ty != Some(ty.clone()) {
-                        return Err(Error {
-                            ty: ErrorType::Type,
-                            pos: self.pos,
-                            msg: format!(
-                                "tried to assign {} to {}",
-                                if let Type::Ptr { to: _ } = rhs.ty.unwrap().clone() {
-                                    "pointer"
-                                } else {
-                                    "int"
-                                },
-                                if let Type::Ptr { to: _ } = ty.clone() {
-                                    "pointer"
-                                } else {
-                                    "int"
-                                },
-                            ),
-                        });
-                    }
-                    let ret = NodeType::Assign {
-                        lhs: Box::new(Node {
-                            ty: Some(ty),
-                            node: NodeType::LVar { val: lvar },
-                        }),
-                        rhs: Box::new(rhs),
-                    };
-                    self.expect(";")?;
-                    Ok(Node {
-                        ty: None,
-                        node: ret,
-                    })
-                } else {
-                    self.expect(";")?;
-                    Ok(Node {
-                        ty: None,
-                        node: NodeType::None,
-                    })
-                }
-            } else {
-                return Err(Error {
-                    ty: ErrorType::Parse,
-                    pos: self.pos,
-                    msg: "expected an identifier".to_string(),
-                });
-            }
+            self.declaration()
         } else {
-            let node = self.expr();
+            let node = self.expr()?;
             self.expect(";")?;
-            node
+            Ok(node)
+        }
+    }
+    fn declaration(&mut self) -> Result<Node, Error> {
+        let ty = self.basetype()?;
+        let s = self.expect_ident()?;
+        let ty = self.type_suffix(ty)?;
+        if self.is_expected_then_next("=") {
+            let lvar = self.new_lvar(&s, &ty)?;
+            let rhs = self.expr()?;
+            // TODO: type check
+            let ret = NodeType::Assign {
+                lhs: Box::new(Node {
+                    ty: Some(ty),
+                    node: NodeType::LVar { val: lvar },
+                }),
+                rhs: Box::new(rhs),
+            };
+            self.expect(";")?;
+            Ok(Node {
+                ty: None,
+                node: ret,
+            })
+        } else {
+            self.new_lvar(&s, &ty)?;
+            self.expect(";")?;
+            Ok(Node {
+                ty: None,
+                node: NodeType::None,
+            })
         }
     }
     fn expr(&mut self) -> Result<Node, Error> {
@@ -525,25 +486,7 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
         let mut node = self.equality()?;
         if self.is_expected_then_next("=") {
             let node2 = self.assign()?;
-            if node.ty.is_some() && node2.ty.is_some() && node.ty != node2.ty {
-                return Err(Error {
-                    ty: ErrorType::Type,
-                    pos: self.pos,
-                    msg: format!(
-                        "tried to assign {} to {}",
-                        if let Type::Ptr { to: _ } = node.ty.unwrap().clone() {
-                            "pointer"
-                        } else {
-                            "int"
-                        },
-                        if let Type::Ptr { to: _ } = node2.ty.unwrap().clone() {
-                            "pointer"
-                        } else {
-                            "int"
-                        },
-                    ),
-                });
-            }
+            // TODO: type check
             node = Node {
                 ty: node2.ty.clone(),
                 node: NodeType::Assign {
@@ -752,28 +695,13 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
         loop {
             if self.is_expected_then_next("+") {
                 let mut node_r = self.mul()?;
-                if let Some(Type::Ptr { to }) = node_r.ty.clone() {
-                    if let Some(Type::Ptr { to: _ }) = node.ty.clone() {
-                        return Err(Error {
-                            ty: ErrorType::Type,
-                            pos: self.pos,
-                            msg: format!(
-                                "cannot add {} and {}",
-                                if let Type::Ptr { to: _ } = node.ty.unwrap().clone() {
-                                    "pointer"
-                                } else {
-                                    "int"
-                                },
-                                if let Type::Ptr { to: _ } = node_r.ty.unwrap().clone() {
-                                    "pointer"
-                                } else {
-                                    "int"
-                                },
-                            ),
-                        });
+                match &node_r.ty {
+                    Some(Type::Ptr { to }) | Some(Type::Array { of: to, size: _ }) => {
+                        // TODO: type check
+                        node.ty = Some(Type::Ptr { to: to.clone() });
+                        std::mem::swap(&mut node, &mut node_r);
                     }
-                    node.ty = Some(Type::Ptr { to: to.clone() });
-                    std::mem::swap(&mut node, &mut node_r);
+                    _ => {}
                 }
                 node = Node {
                     ty: node.ty.clone(),
@@ -786,25 +714,7 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
             } else if self.is_expected_then_next("-") {
                 let node_r = self.mul()?;
                 if let Some(Type::Ptr { to }) = node_r.ty.clone() {
-                    if let Some(Type::Ptr { to: _ }) = node.ty.clone() {
-                        return Err(Error {
-                            ty: ErrorType::Type,
-                            pos: self.pos,
-                            msg: format!(
-                                "cannot subtract {} and {}",
-                                if let Type::Ptr { to: _ } = node.ty.unwrap().clone() {
-                                    "pointer"
-                                } else {
-                                    "int"
-                                },
-                                if let Type::Ptr { to: _ } = node_r.ty.unwrap().clone() {
-                                    "pointer"
-                                } else {
-                                    "int"
-                                },
-                            ),
-                        });
-                    }
+                    // TODO: type check
                     node.ty = Some(Type::Ptr { to });
                 }
                 node = Node {
@@ -891,24 +801,18 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
     }
 
     fn unary(&mut self) -> Result<Node, Error> {
-        if self.next_if(|i| i.0 == Token::Reserved("+")).is_some() {
-            self.unary()
-        } else if self.next_if(|i| i.0 == Token::Reserved("-")).is_some() {
+        if self.is_expected_then_next("sizeof") {
+            Ok(Node {
+                ty: Some(Type::Int),
+                node: NodeType::Num {
+                    val: self.unary()?.ty.unwrap().sizeof() as u64,
+                },
+            })
+        } else if self.is_expected_then_next("+") {
+            self.primary()
+        } else if self.is_expected_then_next("-") {
             let rhs = self.unary()?;
-            if rhs.ty != Some(Type::Int) {
-                return Err(Error {
-                    ty: ErrorType::Type,
-                    pos: self.pos,
-                    msg: format!(
-                        "cannot minus {}",
-                        if let Type::Ptr { to: _ } = rhs.ty.unwrap().clone() {
-                            "pointer"
-                        } else {
-                            "int"
-                        },
-                    ),
-                });
-            }
+            // TODO: type check
             Ok(Node {
                 ty: Some(Type::Int),
                 node: NodeType::Op {
@@ -920,7 +824,7 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
                     rhs: Box::new(rhs),
                 },
             })
-        } else if self.next_if(|i| i.0 == Token::Reserved("&")).is_some() {
+        } else if self.is_expected_then_next("&") {
             let Node { ty, node } = self.unary()?;
             let ty = ty.ok_or(Error {
                 ty: ErrorType::Type,
@@ -935,18 +839,21 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
                     val: Box::new(Node { ty: Some(ty), node }),
                 },
             })
-        } else if self.next_if(|i| i.0 == Token::Reserved("*")).is_some() {
+        } else if self.is_expected_then_next("*") {
             let node = self.unary()?;
             let ret;
             if let Some(ty) = node.ty.clone() {
-                if let Type::Ptr { to } = ty {
-                    ret = Some(*to);
-                } else {
-                    return Err(Error {
-                        ty: ErrorType::Type,
-                        pos: self.pos,
-                        msg: "cannot dereference int".to_string(),
-                    });
+                match ty {
+                    Type::Ptr { to } | Type::Array { of: to, size: _ } => {
+                        ret = Some(*to);
+                    }
+                    _ => {
+                        return Err(Error {
+                            ty: ErrorType::Type,
+                            pos: self.pos,
+                            msg: "cannot dereference int".to_string(),
+                        });
+                    }
                 }
             } else {
                 ret = None;
@@ -958,8 +865,51 @@ impl<T: Iterator<Item = (Token, (usize, usize))> + Clone> Parser<T> {
                 },
             })
         } else {
-            self.primary()
+            self.postfix()
         }
+    }
+
+    fn postfix(&mut self) -> Result<Node, Error> {
+        let mut node = self.primary()?;
+        while self.is_expected_then_next("[") {
+            let mut node_r = self.expr()?;
+            match &node_r.ty {
+                Some(Type::Ptr { to }) | Some(Type::Array { of: to, size: _ }) => {
+                    // TODO: type check
+                    node.ty = Some(Type::Ptr { to: to.clone() });
+                    std::mem::swap(&mut node, &mut node_r);
+                }
+                _ => {}
+            }
+            let ret;
+            if let Some(ty) = node.ty.clone() {
+                match ty {
+                    Type::Ptr { to } | Type::Array { of: to, size: _ } => {
+                        ret = Some(*to);
+                    }
+                    _ => {
+                        todo!()
+                    }
+                }
+            } else {
+                ret = None;
+            }
+            node = Node {
+                ty: ret,
+                node: NodeType::Deref {
+                    val: Box::new(Node {
+                        ty: node.ty.clone(),
+                        node: NodeType::Op {
+                            kind: NodeKind::Add,
+                            lhs: Box::new(node),
+                            rhs: Box::new(node_r),
+                        },
+                    }),
+                },
+            };
+            self.expect("]")?;
+        }
+        Ok(node)
     }
 
     fn primary(&mut self) -> Result<Node, Error> {
